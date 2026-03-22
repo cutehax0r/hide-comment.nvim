@@ -43,7 +43,7 @@ time and we shouldn't be re-inventing the world.
 
 ```lua
 {
-  "wroyca/hide-comment",
+  "cutehax0r/hide-comment.nvim",
   config = function ()
     require ("hide-comment").setup ({
       -- Your configuration here
@@ -56,7 +56,7 @@ time and we shouldn't be re-inventing the world.
 
 ```lua
 use {
-  "wroyca/hide-comment",
+  "cutehax0r/hide-comment.nvim",
   config = function ()
     require ("hide-comment").setup ()
   end
