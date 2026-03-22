@@ -4,6 +4,30 @@ Hide comment lines using Neovim's built-in conceal feature, with smart cursor co
 
 ![Alt text](hide-comment.gif)
 
+## Fork Note
+
+The (original repository)[https://github.com/wroyca/hide-comment.nvim] is gone.
+
+This plugin was originally created by William Roy as seen in the [license](LICENSE.md). They appear
+to have abandoned and deleted the plugin. I took this copy from my local neovim config at some
+arbitrary date because I liked it despite the issues. I've slopped-up some fixes to address issues.
+
+
+* hijacking key bindings is now window local
+* save/restore conceal settings per window
+* debounce recomputation of concealed sections on change
+* improve language detection so aliases (rb -> ruby, tsx -> typescript) are handled properly
+* improvements to partial-comment line handling
+
+Now there are two modes for addressing a cursor that moved into a concealed region
+  * reveal: we unhide that region containing the cursor
+  * skip: move the cursor out of the concealed region (forward or back depending on movement dir)
+
+Movement is still quite quirky and maybe I'll grow to hate this plugin and abandon it like the
+original author. There's a good reason most of these "hide a comment" plugins default to just
+folding them and not removing them entirely. (Neo)vim has been handling folded sections for a long
+time and we shouldn't be re-inventing the world.
+
 ## Features
 
 - **Comment Detection**: Automatically detects comment lines using treesitter queries
