@@ -330,20 +330,24 @@ T["smart_navigation"]["works when enabled"] = function ()
 
   -- Should jump to line 4, skipping concealed lines 2,3
   child.type_keys ("j")
+  vim.wait (20)
   eq (child.api.nvim_win_get_cursor (0)[1], 4)
 
   -- Should jump to line 6, skipping concealed line 5
   child.type_keys ("j")
+  vim.wait (20)
   eq (child.api.nvim_win_get_cursor (0)[1], 6)
 
   -- Test backward navigation
 
   -- Should jump back to line 4
   child.type_keys ("k")
+  vim.wait (20)
   eq (child.api.nvim_win_get_cursor (0)[1], 4)
 
   -- Should jump back to line 1
   child.type_keys ("k")
+  vim.wait (20)
   eq (child.api.nvim_win_get_cursor (0)[1], 1)
 end
 
@@ -407,13 +411,45 @@ T["smart_navigation"]["works with count"] = function ()
   -- Test count-based navigation
   child.api.nvim_win_set_cursor (0, { 1, 0 })
 
-  -- Should jump 2 visible lines forward (1->4->6)
+  -- Native count lands in concealed region, then guard moves to visible boundary
   child.type_keys ("2j")
-  eq (child.api.nvim_win_get_cursor (0)[1], 6)
+  vim.wait (20)
+  eq (child.api.nvim_win_get_cursor (0)[1], 4)
 
-  -- Should jump 2 visible lines backward (6->4->1)
+  -- Native backward count lands in concealed region, then guard moves up
   child.type_keys ("2k")
+  vim.wait (20)
   eq (child.api.nvim_win_get_cursor (0)[1], 1)
+end
+
+T["smart_navigation"]["search landing in concealed line moves to visible boundary"] = function ()
+  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
+
+  child.set_lines ({
+    "start",
+    "-- alpha comment",
+    "-- beta comment",
+    "visible",
+  })
+  child.bo.filetype = "lua"
+  child.lua ("HideComment.enable()")
+  child.api.nvim_win_set_cursor (0, { 1, 0 })
+
+  child.lua ([[vim.fn.search("beta", "W")]])
+  eq (child.api.nvim_win_get_cursor (0)[1], 4)
+end
+
+T["smart_navigation"]["does not install movement keymaps"] = function ()
+  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
+
+  child.set_lines ({ "line 1", "-- comment", "line 3" })
+  child.bo.filetype = "lua"
+  child.lua ("HideComment.enable()")
+
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('k', 'n', false, true); return next(m) == nil end)()"), true)
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('h', 'n', false, true); return next(m) == nil end)()"), true)
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('l', 'n', false, true); return next(m) == nil end)()"), true)
 end
 
 -- -- Auto enable =================================================================
@@ -676,10 +712,12 @@ T["inline_comments"]["smart navigation skips only full comment lines"] = functio
 
   -- Should jump to line 3 (skipping full comment line 2, but not line 3 which has code)
   child.type_keys ("j")
+  vim.wait (20)
   eq (child.api.nvim_win_get_cursor (0)[1], 3)
 
   -- Should jump to line 5 (skipping full comment line 4)
   child.type_keys ("j")
+  vim.wait (20)
   eq (child.api.nvim_win_get_cursor (0)[1], 5)
 end
 
@@ -762,129 +800,6 @@ T["inline_comments"]["multiple inline comments on different lines stay concealed
   expect.no_equality (#extmarks, 0)
 end
 
-T["inline_comments"]["horizontal navigation skips concealed inline comments"] = function ()
-  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
-
-  child.set_lines ({
-    "local x = 2 -- inline comment here",
-  })
-  child.bo.filetype = "lua"
-
-  child.lua ("HideComment.enable()")
-
-  child.api.nvim_win_set_cursor (0, { 1, 0 })
-
-  -- Move 1 right
-  child.type_keys ("l")
-  local pos_1 = child.api.nvim_win_get_cursor (0)
-  -- Should be at position 1
-  eq (pos_1[2], 1)
-
-  -- Move 4 more positions right (total 5)
-  child.type_keys ("4l")
-  local pos_5 = child.api.nvim_win_get_cursor (0)
-  -- Should be at position 5
-  eq (pos_5[2], 5)
-
-  -- Position near end of "local x = 2"
-  child.api.nvim_win_set_cursor (0, { 1, 11 })
-
-  local pos_before = child.api.nvim_win_get_cursor (0)
-  child.type_keys ("l")
-  local pos_after = child.api.nvim_win_get_cursor (0)
-  expect.no_equality (pos_before[2], pos_after[2])
-
-  eq (child.lua_get ("HideComment.is_enabled()"), true)
-end
-
-T["inline_comments"]["horizontal navigation with count works correctly"] = function ()
-  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
-
-  child.set_lines ({
-    "abc def -- comment",
-  })
-  child.bo.filetype = "lua"
-
-  child.lua ("HideComment.enable()")
-
-  child.api.nvim_win_set_cursor (0, { 1, 0 })
-
-  -- Move 3 characters right
-  child.type_keys ("3l")
-  local pos_after_3l = child.api.nvim_win_get_cursor (0)
-
-  -- Should have moved from position 0
-  expect.no_equality (pos_after_3l[2], 0)
-
-  eq (child.lua_get ("HideComment.is_enabled()"), true)
-end
-
-T["inline_comments"]["horizontal navigation disabled when smart_navigation is false"] = function ()
-  child.lua ('require("hide-comment").setup({ smart_navigation = false })')
-
-  child.set_lines ({
-    "local x = 2 -- comment",
-  })
-  child.bo.filetype = "lua"
-
-  child.lua ("HideComment.enable()")
-
-  -- Position cursor at beginning
-  child.api.nvim_win_set_cursor (0, { 1, 0 })
-
-  -- Move right - should use normal navigation (no special handling)
-  child.type_keys ("l")
-  local pos_after_l = child.api.nvim_win_get_cursor (0)
-
-  -- Should have moved normally by 1 character
-  eq (pos_after_l[2], 1)
-
-  eq (child.lua_get ("HideComment.config.smart_navigation"), false)
-end
-
-T["smart_navigation"]["keymaps are buffer-local and detach on disable"] = function ()
-  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
-
-  child.set_lines ({ "line 1", "-- comment", "line 3" })
-  child.bo.filetype = "lua"
-  child.lua ("HideComment.enable()")
-
-  eq (child.lua_get (
-    "(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) ~= nil and m.buffer == 1 end)()"
-  ), true)
-
-  child.lua ([[
-    local bufnr = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_set_current_buf(bufnr)
-  ]])
-
-  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
-
-  child.lua ([[
-    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].filetype == 'lua' then
-        vim.api.nvim_set_current_buf(bufnr)
-        break
-      end
-    end
-  ]])
-
-  child.lua ("HideComment.disable()")
-  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
-end
-
-T["smart_navigation"]["disabling smart_navigation removes existing buffer keymaps"] = function ()
-  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
-
-  child.set_lines ({ "line 1", "-- comment", "line 3" })
-  child.bo.filetype = "lua"
-  child.lua ("HideComment.enable()")
-
-  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) ~= nil end)()"), true)
-
-  child.lua ('require("hide-comment").setup({ smart_navigation = false })')
-  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
-end
 
 -- Window options =============================================================
 T["window_options"] = new_set ()

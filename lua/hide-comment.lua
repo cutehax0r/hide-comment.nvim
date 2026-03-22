@@ -8,7 +8,7 @@
 --- Features:
 --- - Hide comment lines using Neovim's conceal feature with smart navigation.
 --- - Automatic detection of comments using treesitter queries.
---- - Smart navigation that skips concealed comment lines and inline comments.
+--- - Smart navigation that keeps cursor out of concealed comment regions.
 --- - Buffer-local and global configuration support.
 --- - Customizable concealing level and refresh behavior.
 --- - User commands for easy control.
@@ -108,10 +108,9 @@ end
 ---
 --- ## Smart navigation ~
 ---
---- `smart_navigation` enables special j/k/h/l movement that skips over concealed
---- comment lines and inline comments. This prevents getting "stuck" on hidden
---- lines when navigating vertically or on concealed inline comments when
---- navigating horizontally.
+--- `smart_navigation` keeps cursor movement conceal-aware after motions.
+--- If a motion lands inside a concealed line or inline comment region,
+--- cursor is moved to the nearest visible boundary.
 ---
 --- ## Conceal level ~
 ---
@@ -135,7 +134,7 @@ HideComment.config = {
   -- Whether to automatically enable for all supported languages
   auto_enable = false,
 
-  -- Whether to enable smart navigation that skips concealed lines and inline comments
+  -- Whether to keep cursor out of concealed regions after motions
   smart_navigation = true,
 
   -- The conceallevel to set when concealing (0-3)
@@ -168,8 +167,11 @@ H.comment_query = "(comment) @comment"
 ---@type table<__hide_comment_buffer_handle, ConcealedLine[]> Track concealed lines per buffer
 H.concealed_buffers = {}
 
----@type table<__hide_comment_buffer_handle, boolean> Track buffers with active smart-navigation maps
-H.navigation_attached = {}
+---@type table<number, { line: __hide_comment_line_number, col: __hide_comment_column_number }> Track last cursor position per window
+H.last_cursor_by_win = {}
+
+---@type table<number, boolean> Prevent recursive cursor correction per window
+H.cursor_adjusting = {}
 
 ---@type table<string, { conceallevel: number, concealcursor: string }> Track original window conceal options
 H.window_option_state = {}
@@ -603,12 +605,25 @@ end
 ---@return boolean is_concealed
 H.is_line_concealed = function (bufnr, line_nr)
   local concealed_lines = H.concealed_buffers[bufnr]
-  if not concealed_lines then
-    return false
+  if concealed_lines then
+    for _, concealed_line in ipairs (concealed_lines) do
+      if concealed_line.row + 1 == line_nr then -- Convert 0-based to 1-based
+        return true
+      end
+    end
   end
 
-  for _, concealed_line in ipairs (concealed_lines) do
-    if concealed_line.row + 1 == line_nr then -- Convert 0-based to 1-based
+  local extmarks = vim.api.nvim_buf_get_extmarks (
+    bufnr,
+    H.namespace_id,
+    { line_nr - 1, 0 },
+    { line_nr - 1, -1 },
+    { details = true }
+  )
+
+  for _, extmark in ipairs (extmarks) do
+    local details = extmark[4]
+    if details and details.conceal_lines ~= nil then
       return true
     end
   end
@@ -697,141 +712,95 @@ H.find_next_visible_column = function (bufnr, line_nr, col_nr, direction)
   return direction > 0 and max_col or 0
 end
 
----@param direction number 1 for right, -1 for left
----@param count number Number of moves to make
-H.smart_navigate_horizontal = function (direction, count)
-  local bufnr = vim.api.nvim_get_current_buf ()
-
-  -- Use normal navigation if concealing is not active
-  if not H.concealed_buffers[bufnr] then
-    local key = direction > 0 and "l" or "h"
-    local cmd = count > 1 and (count .. key) or key
-    vim.cmd ("normal! " .. cmd)
-    return
+---@param winid number
+---@param current_pos { [1]: number, [2]: number }
+---@return number line_direction
+---@return number column_direction
+H.get_cursor_direction = function (winid, current_pos)
+  local previous_pos = H.last_cursor_by_win[winid]
+  if not previous_pos then
+    return H.direction.down, 1
   end
 
-  local current_pos = vim.api.nvim_win_get_cursor (0)
-  local current_line, current_col = current_pos[1], current_pos[2]
-  local target_col = current_col
-
-  for _ = 1, count do
-    local next_col = H.find_next_visible_column (bufnr, current_line, target_col, direction)
-    if next_col == target_col then
-      break
-    end
-    target_col = next_col
+  if current_pos[1] > previous_pos.line then
+    return H.direction.down, 1
+  end
+  if current_pos[1] < previous_pos.line then
+    return H.direction.up, -1
+  end
+  if current_pos[2] > previous_pos.col then
+    return H.direction.down, 1
+  end
+  if current_pos[2] < previous_pos.col then
+    return H.direction.up, -1
   end
 
-  if target_col ~= current_col then
-    vim.api.nvim_win_set_cursor (0, { current_line, target_col })
-  end
-end
-
----@param direction number H.direction.down or H.direction.up
----@param count number Number of moves to make
-H.smart_navigate = function (direction, count)
-  local bufnr = vim.api.nvim_get_current_buf ()
-
-  -- Use normal navigation if concealing is not active
-  if not H.concealed_buffers[bufnr] then
-    local key = direction > 0 and "j" or "k"
-    local cmd = count > 1 and (count .. key) or key
-    vim.cmd ("normal! " .. cmd)
-    return
-  end
-
-  local current_line = vim.fn.line (".")
-  local target_line = current_line
-
-  for _ = 1, count do
-    local next_line = H.find_next_visible_line (bufnr, target_line, direction)
-    if next_line == target_line then
-      break
-    end
-    target_line = next_line
-  end
-
-  if target_line ~= current_line then
-    vim.api.nvim_win_set_cursor (0, { target_line, vim.fn.col (".") - 1 })
-  end
-end
-
-H.navigation_maps = {
-  { "i", "<Down>", "down" },
-  { "i", "<Up>", "up" },
-  { "i", "<Right>", "right" },
-  { "i", "<Left>", "left" },
-  { "n", "j", "down" },
-  { "n", "k", "up" },
-  { "n", "<Down>", "down" },
-  { "n", "<Up>", "up" },
-  { "n", "l", "right" },
-  { "n", "h", "left" },
-  { "n", "<Right>", "right" },
-  { "n", "<Left>", "left" },
-  { "v", "j", "down" },
-  { "v", "k", "up" },
-  { "v", "<Down>", "down" },
-  { "v", "<Up>", "up" },
-  { "v", "l", "right" },
-  { "v", "h", "left" },
-  { "v", "<Right>", "right" },
-  { "v", "<Left>", "left" },
-}
-
-H.setup_navigation_keymaps = function (bufnr)
-  local config = H.get_buffer_config (bufnr)
-  if not config.smart_navigation or H.navigation_attached[bufnr] then
-    return
-  end
-
-  local is_valid, _ = H.validate_buffer (bufnr)
-  if not is_valid then
-    return
-  end
-
-  local keymap_opts = { desc = "Smart comment navigation", buffer = bufnr, silent = true }
-
-  local function move_down ()
-    H.smart_navigate (H.direction.down, vim.v.count1)
-  end
-  local function move_up ()
-    H.smart_navigate (H.direction.up, vim.v.count1)
-  end
-  local function move_right ()
-    H.smart_navigate_horizontal (1, vim.v.count1)
-  end
-  local function move_left ()
-    H.smart_navigate_horizontal (-1, vim.v.count1)
-  end
-
-  local handlers = {
-    down = move_down,
-    up = move_up,
-    right = move_right,
-    left = move_left,
-  }
-
-  for _, map in ipairs (H.navigation_maps) do
-    local mode, lhs, handler_name = map[1], map[2], map[3]
-    vim.keymap.set (mode, lhs, handlers[handler_name], keymap_opts)
-  end
-
-  H.navigation_attached[bufnr] = true
+  return H.direction.down, 1
 end
 
 ---@param bufnr __hide_comment_buffer_handle
-H.remove_navigation_keymaps = function (bufnr)
-  if not H.navigation_attached[bufnr] then
+---@param winid number
+H.correct_cursor_if_concealed = function (bufnr, winid)
+  local current_pos = vim.api.nvim_win_get_cursor (winid)
+  local current_line, current_col = current_pos[1], current_pos[2]
+  local line_direction, column_direction = H.get_cursor_direction (winid, current_pos)
+
+  local target_line = current_line
+  local target_col = current_col
+
+  if H.is_line_concealed (bufnr, current_line) then
+    target_line = H.find_next_visible_line (bufnr, current_line, line_direction)
+    if target_line == current_line then
+      target_line = H.find_next_visible_line (bufnr, current_line, -line_direction)
+    end
+
+    if target_line ~= current_line then
+      local target_line_text = vim.api.nvim_buf_get_lines (bufnr, target_line - 1, target_line, false)[1] or ""
+      target_col = math.min (current_col, #target_line_text)
+    end
+  elseif H.is_position_concealed (bufnr, current_line, current_col) then
+    target_col = H.find_next_visible_column (bufnr, current_line, current_col, column_direction)
+    if target_col == current_col then
+      target_col = H.find_next_visible_column (bufnr, current_line, current_col, -column_direction)
+    end
+  end
+
+  if target_line == current_line and target_col == current_col then
     return
   end
 
-  for _, map in ipairs (H.navigation_maps) do
-    local mode, lhs = map[1], map[2]
-    pcall (vim.keymap.del, mode, lhs, { buffer = bufnr })
+  H.cursor_adjusting[winid] = true
+  vim.api.nvim_win_set_cursor (winid, { target_line, target_col })
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@param winid number
+H.handle_cursor_moved = function (bufnr, winid)
+  if not vim.api.nvim_win_is_valid (winid) then
+    return
   end
 
-  H.navigation_attached[bufnr] = nil
+  local current_pos = vim.api.nvim_win_get_cursor (winid)
+  if H.cursor_adjusting[winid] then
+    H.cursor_adjusting[winid] = nil
+    H.last_cursor_by_win[winid] = { line = current_pos[1], col = current_pos[2] }
+    return
+  end
+
+  if not H.concealed_buffers[bufnr] then
+    H.last_cursor_by_win[winid] = { line = current_pos[1], col = current_pos[2] }
+    return
+  end
+
+  local config = H.get_buffer_config (bufnr)
+  if not config.smart_navigation then
+    H.last_cursor_by_win[winid] = { line = current_pos[1], col = current_pos[2] }
+    return
+  end
+
+  H.correct_cursor_if_concealed (bufnr, winid)
+  local updated_pos = vim.api.nvim_win_get_cursor (winid)
+  H.last_cursor_by_win[winid] = { line = updated_pos[1], col = updated_pos[2] }
 end
 
 H.create_autocommands = function ()
@@ -877,12 +846,24 @@ H.create_autocommands = function ()
   vim.api.nvim_create_autocmd ("BufWinEnter", {
     group = H.augroup_id,
     callback = function (args)
+      local winid = vim.api.nvim_get_current_win ()
+      local pos = vim.api.nvim_win_get_cursor (winid)
+      H.last_cursor_by_win[winid] = { line = pos[1], col = pos[2] }
+
       if H.concealed_buffers[args.buf] then
-        local winid = vim.api.nvim_get_current_win ()
         H.apply_window_conceal_options (args.buf, winid)
       end
     end,
     desc = "Apply window conceal options when entering concealed buffer",
+  })
+
+  vim.api.nvim_create_autocmd ({ "CursorMoved", "CursorMovedI" }, {
+    group = H.augroup_id,
+    callback = function (args)
+      local winid = vim.api.nvim_get_current_win ()
+      H.handle_cursor_moved (args.buf, winid)
+    end,
+    desc = "Keep cursor out of concealed regions",
   })
 
   vim.api.nvim_create_autocmd ("BufWinLeave", {
@@ -908,6 +889,9 @@ H.create_autocommands = function ()
           H.window_option_state[key] = nil
         end
       end
+
+      H.last_cursor_by_win[winid] = nil
+      H.cursor_adjusting[winid] = nil
     end,
     desc = "Cleanup stored conceal options for closed windows",
   })
@@ -916,7 +900,6 @@ H.create_autocommands = function ()
   vim.api.nvim_create_autocmd ("BufDelete", {
     group = H.augroup_id,
     callback = function (args)
-      H.remove_navigation_keymaps (args.buf)
       H.cancel_refresh_timer (args.buf)
       H.restore_conceal_for_buffer_windows (args.buf)
       H.concealed_buffers[args.buf] = nil
@@ -1001,16 +984,6 @@ end
 
 H.apply_config = function (config)
   HideComment.config = config
-
-  if not config.smart_navigation then
-    for bufnr, _ in pairs (H.navigation_attached) do
-      H.remove_navigation_keymaps (bufnr)
-    end
-  else
-    for bufnr, _ in pairs (H.concealed_buffers) do
-      H.setup_navigation_keymaps (bufnr)
-    end
-  end
 end
 
 H.is_disabled = function ()
@@ -1057,9 +1030,6 @@ HideComment.enable = function (bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf ()
 
   local success, error_msg = H.apply_concealing (bufnr)
-  if success then
-    H.setup_navigation_keymaps (bufnr)
-  end
   return success, error_msg
 end
 
@@ -1082,7 +1052,6 @@ HideComment.disable = function (bufnr)
   local success, error_msg = H.remove_concealing (bufnr)
   if success then
     H.cancel_refresh_timer (bufnr)
-    H.remove_navigation_keymaps (bufnr)
   end
   return success, error_msg
 end
