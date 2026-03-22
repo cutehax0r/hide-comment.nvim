@@ -6,7 +6,7 @@ Hide comment lines using Neovim's built-in conceal feature, with smart cursor co
 
 ## Fork Note
 
-The (original repository)[https://github.com/wroyca/hide-comment.nvim] is gone.
+The [original repository](https://github.com/wroyca/hide-comment.nvim) is gone.
 
 This plugin was originally created by William Roy as seen in the [license](LICENSE.md). They appear
 to have abandoned and deleted the plugin. I took this copy from my local neovim config at some
