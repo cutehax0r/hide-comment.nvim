@@ -7,7 +7,7 @@ Hide comment lines using Neovim's built-in conceal feature, with smart cursor co
 ## Features
 
 - **Comment Detection**: Automatically detects comment lines using treesitter queries
-- **Smart Navigation**: Motion-aware cursor correction keeps the cursor out of concealed lines and inline comments
+- **Smart Navigation**: Vertical `j/k` stays visual and motion landings can skip or temporarily reveal concealed regions
 - **Auto Enable**: Optionally auto-enable for all supported filetypes
 - **Buffer Local**: Support for buffer-local configuration
 - **Refresh on Change**: Automatically refresh when buffer content changes
@@ -48,6 +48,9 @@ require ("hide-comment").setup ({
 
   -- Whether to keep cursor out of concealed regions after motions
   smart_navigation = true,
+
+  -- How smart navigation handles concealed landings: "skip" | "reveal"
+  smart_navigation_mode = "skip",
 
   -- The conceallevel to set when concealing (0-3)
   conceal_level = 3,
@@ -91,6 +94,9 @@ print (string.format ("Hidden %d/%d lines (%.1f%%)",
        stats.concealed_lines,
        stats.total_lines,
        stats.concealed_percentage))
+
+-- Toggle navigation mode at runtime
+HideComment.toggle_navigation_mode ()
 ```
 
 ### User Commands
@@ -99,6 +105,7 @@ print (string.format ("Hidden %d/%d lines (%.1f%%)",
 - `:HideCommentDisable` - Show comments in current buffer
 - `:HideCommentToggle` - Toggle comments in current buffer
 - `:HideCommentStatus` - Show current status
+- `:HideCommentNavMode [skip|reveal|toggle]` - Get or change smart navigation mode
 
 ### Buffer-local Configuration
 

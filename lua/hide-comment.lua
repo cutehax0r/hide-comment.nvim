@@ -112,6 +112,10 @@ end
 --- If a motion lands inside a concealed line or inline comment region,
 --- cursor is moved to the nearest visible boundary.
 ---
+--- `smart_navigation_mode` controls how concealed landings are handled:
+--- - `"skip"`: move cursor to nearest visible boundary.
+--- - `"reveal"`: temporarily reveal the landed concealed region.
+---
 --- ## Conceal level ~
 ---
 --- `conceal_level` sets the value of 'conceallevel' when comment hiding is active.
@@ -136,6 +140,9 @@ HideComment.config = {
 
   -- Whether to keep cursor out of concealed regions after motions
   smart_navigation = true,
+
+  -- How smart navigation handles concealed landings: "skip" | "reveal"
+  smart_navigation_mode = "skip",
 
   -- The conceallevel to set when concealing (0-3)
   conceal_level = 3,
@@ -172,6 +179,12 @@ H.last_cursor_by_win = {}
 
 ---@type table<number, boolean> Prevent recursive cursor correction per window
 H.cursor_adjusting = {}
+
+---@type table<__hide_comment_buffer_handle, boolean> Track buffers with active vertical navigation maps
+H.vertical_navigation_attached = {}
+
+---@type table<number, { bufnr: __hide_comment_buffer_handle, signature: string, specs: table[] }> Track temporarily revealed concealed regions by window
+H.revealed_region_by_win = {}
 
 ---@type table<string, { conceallevel: number, concealcursor: string }> Track original window conceal options
 H.window_option_state = {}
@@ -550,6 +563,8 @@ end
 H.apply_concealing = function (bufnr)
   H.debug_log ("Applying concealing to buffer " .. bufnr)
 
+  H.clear_revealed_for_buffer (bufnr)
+
   local is_valid, error_msg = H.validate_buffer (bufnr)
   if not is_valid then
     return false, error_msg
@@ -574,6 +589,7 @@ H.apply_concealing = function (bufnr)
 
   local concealed_lines = H.create_concealing_extmarks (bufnr, nodes)
   H.concealed_buffers[bufnr] = concealed_lines
+  H.setup_vertical_navigation_keymaps (bufnr)
 
   H.debug_log ("Successfully concealed " .. #concealed_lines .. " lines")
   return true, nil
@@ -592,6 +608,8 @@ H.remove_concealing = function (bufnr)
 
   vim.api.nvim_buf_clear_namespace (bufnr, H.namespace_id, 0, -1)
   H.concealed_buffers[bufnr] = nil
+  H.clear_revealed_for_buffer (bufnr)
+  H.remove_vertical_navigation_keymaps (bufnr)
 
   -- Restore original conceal options in windows showing this buffer
   H.restore_conceal_for_buffer_windows (bufnr)
@@ -712,6 +730,175 @@ H.find_next_visible_column = function (bufnr, line_nr, col_nr, direction)
   return direction > 0 and max_col or 0
 end
 
+---@param details table
+---@return table
+H.extmark_restore_opts = function (details)
+  return {
+    end_row = details.end_row,
+    end_col = details.end_col,
+    conceal = details.conceal,
+    conceal_lines = details.conceal_lines,
+    priority = details.priority,
+  }
+end
+
+---@param extmark table
+---@return string
+H.extmark_signature = function (extmark)
+  local details = extmark[4] or {}
+  return table.concat ({
+    tostring (extmark[2]),
+    tostring (extmark[3]),
+    tostring (details.end_row),
+    tostring (details.end_col),
+    tostring (details.conceal),
+    tostring (details.conceal_lines),
+  }, ":")
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@param line_nr __hide_comment_line_number
+---@param col_nr __hide_comment_column_number
+---@return table[] extmarks
+---@return string signature
+H.get_concealed_extmarks_at_position = function (bufnr, line_nr, col_nr)
+  local extmarks = vim.api.nvim_buf_get_extmarks (
+    bufnr,
+    H.namespace_id,
+    { line_nr - 1, 0 },
+    { line_nr - 1, -1 },
+    { details = true }
+  )
+
+  local matches = {}
+  local signatures = {}
+  for _, extmark in ipairs (extmarks) do
+    local details = extmark[4] or {}
+    local is_line_match = details.conceal_lines ~= nil
+    local is_inline_match = false
+
+    if details.end_row and details.end_col and extmark[2] == line_nr - 1 and details.end_row == line_nr - 1 then
+      is_inline_match = col_nr >= extmark[3] and col_nr < details.end_col
+    end
+
+    if is_line_match or is_inline_match then
+      table.insert (matches, extmark)
+      table.insert (signatures, H.extmark_signature (extmark))
+    end
+  end
+
+  table.sort (signatures)
+  return matches, table.concat (signatures, "|")
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@param spec table
+---@return boolean
+H.has_matching_extmark = function (bufnr, spec)
+  local extmarks = vim.api.nvim_buf_get_extmarks (
+    bufnr,
+    H.namespace_id,
+    { spec.row, spec.col },
+    { spec.row, spec.col },
+    { details = true }
+  )
+
+  for _, extmark in ipairs (extmarks) do
+    local details = extmark[4] or {}
+    if extmark[2] == spec.row
+      and extmark[3] == spec.col
+      and details.end_row == spec.opts.end_row
+      and details.end_col == spec.opts.end_col
+      and details.conceal == spec.opts.conceal
+      and details.conceal_lines == spec.opts.conceal_lines
+    then
+      return true
+    end
+  end
+
+  return false
+end
+
+---@param winid number
+H.restore_revealed_for_window = function (winid)
+  local state = H.revealed_region_by_win[winid]
+  if not state then
+    return
+  end
+
+  H.revealed_region_by_win[winid] = nil
+  if not vim.api.nvim_buf_is_valid (state.bufnr) then
+    return
+  end
+
+  for _, spec in ipairs (state.specs) do
+    if not H.has_matching_extmark (state.bufnr, spec) then
+      pcall (vim.api.nvim_buf_set_extmark, state.bufnr, H.namespace_id, spec.row, spec.col, spec.opts)
+    end
+  end
+end
+
+---@param winid number
+H.clear_revealed_for_window = function (winid)
+  H.revealed_region_by_win[winid] = nil
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.restore_revealed_for_buffer = function (bufnr)
+  for winid, state in pairs (H.revealed_region_by_win) do
+    if state.bufnr == bufnr then
+      H.restore_revealed_for_window (winid)
+    end
+  end
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.clear_revealed_for_buffer = function (bufnr)
+  for winid, state in pairs (H.revealed_region_by_win) do
+    if state.bufnr == bufnr then
+      H.clear_revealed_for_window (winid)
+    end
+  end
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@param winid number
+---@param line_nr __hide_comment_line_number
+---@param col_nr __hide_comment_column_number
+---@return boolean
+H.reveal_landed_region = function (bufnr, winid, line_nr, col_nr)
+  local matched_extmarks, signature = H.get_concealed_extmarks_at_position (bufnr, line_nr, col_nr)
+  if #matched_extmarks == 0 then
+    H.restore_revealed_for_window (winid)
+    return false
+  end
+
+  local current = H.revealed_region_by_win[winid]
+  if current and current.bufnr == bufnr and current.signature == signature then
+    return true
+  end
+
+  H.restore_revealed_for_window (winid)
+
+  local specs = {}
+  for _, extmark in ipairs (matched_extmarks) do
+    table.insert (specs, {
+      row = extmark[2],
+      col = extmark[3],
+      opts = H.extmark_restore_opts (extmark[4] or {}),
+    })
+    pcall (vim.api.nvim_buf_del_extmark, bufnr, H.namespace_id, extmark[1])
+  end
+
+  H.revealed_region_by_win[winid] = {
+    bufnr = bufnr,
+    signature = signature,
+    specs = specs,
+  }
+
+  return true
+end
+
 ---@param winid number
 ---@param current_pos { [1]: number, [2]: number }
 ---@return number line_direction
@@ -738,12 +925,92 @@ H.get_cursor_direction = function (winid, current_pos)
   return H.direction.down, 1
 end
 
+---@param direction number H.direction.down or H.direction.up
+---@param count number
+H.smart_navigate_vertical = function (direction, count)
+  local bufnr = vim.api.nvim_get_current_buf ()
+
+  if not H.concealed_buffers[bufnr] then
+    local key = direction > 0 and "j" or "k"
+    local cmd = count > 1 and (count .. key) or key
+    vim.cmd ("normal! " .. cmd)
+    return
+  end
+
+  local current_line = vim.fn.line (".")
+  local target_line = current_line
+
+  for _ = 1, count do
+    local next_line = H.find_next_visible_line (bufnr, target_line, direction)
+    if next_line == target_line then
+      break
+    end
+    target_line = next_line
+  end
+
+  if target_line ~= current_line then
+    vim.api.nvim_win_set_cursor (0, { target_line, vim.fn.col (".") - 1 })
+  end
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.setup_vertical_navigation_keymaps = function (bufnr)
+  local config = H.get_buffer_config (bufnr)
+  if not config.smart_navigation or H.vertical_navigation_attached[bufnr] then
+    return
+  end
+
+  local is_valid, _ = H.validate_buffer (bufnr)
+  if not is_valid then
+    return
+  end
+
+  local opts = { desc = "Smart vertical comment navigation", buffer = bufnr, silent = true }
+
+  vim.keymap.set ({ "n", "v" }, "j", function ()
+    H.smart_navigate_vertical (H.direction.down, vim.v.count1)
+  end, opts)
+  vim.keymap.set ({ "n", "v" }, "k", function ()
+    H.smart_navigate_vertical (H.direction.up, vim.v.count1)
+  end, opts)
+  vim.keymap.set ({ "n", "v" }, "<Down>", function ()
+    H.smart_navigate_vertical (H.direction.down, vim.v.count1)
+  end, opts)
+  vim.keymap.set ({ "n", "v" }, "<Up>", function ()
+    H.smart_navigate_vertical (H.direction.up, vim.v.count1)
+  end, opts)
+
+  H.vertical_navigation_attached[bufnr] = true
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.remove_vertical_navigation_keymaps = function (bufnr)
+  if not H.vertical_navigation_attached[bufnr] then
+    return
+  end
+
+  for _, lhs in ipairs ({ "j", "k", "<Down>", "<Up>" }) do
+    pcall (vim.keymap.del, "n", lhs, { buffer = bufnr })
+    pcall (vim.keymap.del, "v", lhs, { buffer = bufnr })
+  end
+
+  H.vertical_navigation_attached[bufnr] = nil
+end
+
 ---@param bufnr __hide_comment_buffer_handle
 ---@param winid number
 H.correct_cursor_if_concealed = function (bufnr, winid)
   local current_pos = vim.api.nvim_win_get_cursor (winid)
   local current_line, current_col = current_pos[1], current_pos[2]
   local line_direction, column_direction = H.get_cursor_direction (winid, current_pos)
+  local config = H.get_buffer_config (bufnr)
+
+  if config.smart_navigation_mode == "reveal" then
+    H.reveal_landed_region (bufnr, winid, current_line, current_col)
+    return
+  end
+
+  H.restore_revealed_for_window (winid)
 
   local target_line = current_line
   local target_col = current_col
@@ -788,12 +1055,14 @@ H.handle_cursor_moved = function (bufnr, winid)
   end
 
   if not H.concealed_buffers[bufnr] then
+    H.restore_revealed_for_window (winid)
     H.last_cursor_by_win[winid] = { line = current_pos[1], col = current_pos[2] }
     return
   end
 
   local config = H.get_buffer_config (bufnr)
   if not config.smart_navigation then
+    H.restore_revealed_for_window (winid)
     H.last_cursor_by_win[winid] = { line = current_pos[1], col = current_pos[2] }
     return
   end
@@ -870,6 +1139,7 @@ H.create_autocommands = function ()
     group = H.augroup_id,
     callback = function (args)
       local winid = vim.api.nvim_get_current_win ()
+      H.restore_revealed_for_window (winid)
       H.restore_window_conceal_options (args.buf, winid)
     end,
     desc = "Restore window conceal options when leaving buffer",
@@ -892,6 +1162,7 @@ H.create_autocommands = function ()
 
       H.last_cursor_by_win[winid] = nil
       H.cursor_adjusting[winid] = nil
+      H.clear_revealed_for_window (winid)
     end,
     desc = "Cleanup stored conceal options for closed windows",
   })
@@ -901,6 +1172,8 @@ H.create_autocommands = function ()
     group = H.augroup_id,
     callback = function (args)
       H.cancel_refresh_timer (args.buf)
+      H.remove_vertical_navigation_keymaps (args.buf)
+      H.clear_revealed_for_buffer (args.buf)
       H.restore_conceal_for_buffer_windows (args.buf)
       H.concealed_buffers[args.buf] = nil
 
@@ -941,8 +1214,37 @@ H.create_user_commands = function ()
     local bufnr = vim.api.nvim_get_current_buf ()
     local stats = HideComment.get_stats (bufnr)
     local status = stats.is_enabled and "enabled" or "disabled"
-    H.notify (string.format ("Comment hiding is %s (%d lines hidden)", status, stats.concealed_lines))
+    local mode = HideComment.get_navigation_mode (bufnr)
+    H.notify (string.format ("Comment hiding is %s (%d lines hidden, nav mode: %s)", status, stats.concealed_lines, mode))
   end, { desc = "Show comment hiding status" })
+
+  vim.api.nvim_create_user_command ("HideCommentNavMode", function (args)
+    local arg = args.args
+    if arg == "" then
+      H.notify ("HideComment navigation mode: " .. HideComment.get_navigation_mode ())
+      return
+    end
+
+    if arg == "toggle" then
+      local mode = HideComment.toggle_navigation_mode ()
+      H.notify ("HideComment navigation mode: " .. mode)
+      return
+    end
+
+    local ok, err = HideComment.set_navigation_mode (arg)
+    if not ok then
+      vim.notify ("Failed to set navigation mode: " .. err, vim.log.levels.ERROR)
+      return
+    end
+
+    H.notify ("HideComment navigation mode: " .. arg)
+  end, {
+    desc = "Get or set smart navigation mode",
+    nargs = "?",
+    complete = function ()
+      return { "skip", "reveal", "toggle" }
+    end,
+  })
 end
 
 H.create_default_hl = function ()
@@ -964,6 +1266,7 @@ H.setup_config = function (config)
 
   vim.validate ("auto_enable", config.auto_enable, "boolean")
   vim.validate ("smart_navigation", config.smart_navigation, "boolean")
+  vim.validate ("smart_navigation_mode", config.smart_navigation_mode, "string")
   vim.validate ("conceal_level", config.conceal_level, "number")
   vim.validate ("refresh_on_change", config.refresh_on_change, "boolean")
   vim.validate ("refresh_debounce_ms", config.refresh_debounce_ms, "number")
@@ -979,11 +1282,29 @@ H.setup_config = function (config)
     error ("(hide-comment) `refresh_debounce_ms` should be >= 0")
   end
 
+  if config.smart_navigation_mode ~= "skip" and config.smart_navigation_mode ~= "reveal" then
+    error ("(hide-comment) `smart_navigation_mode` should be either 'skip' or 'reveal'")
+  end
+
   return config
 end
 
 H.apply_config = function (config)
   HideComment.config = config
+
+  if not config.smart_navigation then
+    for bufnr, _ in pairs (H.vertical_navigation_attached) do
+      H.remove_vertical_navigation_keymaps (bufnr)
+    end
+    for winid, _ in pairs (H.revealed_region_by_win) do
+      H.restore_revealed_for_window (winid)
+    end
+    return
+  end
+
+  for bufnr, _ in pairs (H.concealed_buffers) do
+    H.setup_vertical_navigation_keymaps (bufnr)
+  end
 end
 
 H.is_disabled = function ()
@@ -1096,6 +1417,60 @@ end
 HideComment.is_enabled = function (bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf ()
   return H.concealed_buffers[bufnr] ~= nil
+end
+
+---@param bufnr? __hide_comment_buffer_handle
+---@return string
+HideComment.get_navigation_mode = function (bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf ()
+  local config = H.get_buffer_config (bufnr)
+  return config.smart_navigation_mode
+end
+
+---@param mode string
+---@param bufnr? __hide_comment_buffer_handle
+---@return boolean success
+---@return string? error_message
+HideComment.set_navigation_mode = function (mode, bufnr)
+  if mode ~= "skip" and mode ~= "reveal" then
+    return false, "Navigation mode should be either 'skip' or 'reveal'"
+  end
+
+  if bufnr == nil then
+    HideComment.config.smart_navigation_mode = mode
+    for winid, _ in pairs (H.revealed_region_by_win) do
+      H.restore_revealed_for_window (winid)
+    end
+    return true, nil
+  end
+
+  local is_valid, error_msg = H.validate_buffer (bufnr)
+  if not is_valid then
+    return false, error_msg
+  end
+
+  local ok, local_config = pcall (vim.api.nvim_buf_get_var, bufnr, "hidecomment_config")
+  if not ok or type (local_config) ~= "table" then
+    local_config = {}
+  end
+
+  local_config.smart_navigation_mode = mode
+  vim.api.nvim_buf_set_var (bufnr, "hidecomment_config", local_config)
+
+  for _, winid in ipairs (H.get_buffer_windows (bufnr)) do
+    H.restore_revealed_for_window (winid)
+  end
+
+  return true, nil
+end
+
+---@param bufnr? __hide_comment_buffer_handle
+---@return string mode
+HideComment.toggle_navigation_mode = function (bufnr)
+  local current_mode = HideComment.get_navigation_mode (bufnr)
+  local next_mode = current_mode == "skip" and "reveal" or "skip"
+  HideComment.set_navigation_mode (next_mode, bufnr)
+  return next_mode
 end
 
 --- Get hiding statistics for a buffer

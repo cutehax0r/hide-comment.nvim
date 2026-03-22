@@ -71,6 +71,7 @@ T["setup()"]["creates user commands"] = function ()
     "HideCommentDisable",
     "HideCommentToggle",
     "HideCommentStatus",
+    "HideCommentNavMode",
   }
 
   for _, cmd in ipairs (commands) do
@@ -97,6 +98,10 @@ T["setup()"]["validates config"] = function ()
   expect.error (function ()
     child.lua ('require("hide-comment").setup({ refresh_debounce_ms = -1 })')
   end)
+
+  expect.error (function ()
+    child.lua ('require("hide-comment").setup({ smart_navigation_mode = "nope" })')
+  end)
 end
 
 -- Config ======================================================================
@@ -108,6 +113,7 @@ T["config"]["has correct default"] = function ()
   local config = child.lua_get ("HideComment.config")
   eq (config.auto_enable, false)
   eq (config.smart_navigation, true)
+  eq (config.smart_navigation_mode, "skip")
   eq (config.conceal_level, 3)
   eq (config.refresh_on_change, true)
   eq (config.refresh_debounce_ms, 100)
@@ -439,17 +445,46 @@ T["smart_navigation"]["search landing in concealed line moves to visible boundar
   eq (child.api.nvim_win_get_cursor (0)[1], 4)
 end
 
-T["smart_navigation"]["does not install movement keymaps"] = function ()
+T["smart_navigation"]["installs only vertical movement keymaps"] = function ()
   child.lua ('require("hide-comment").setup({ smart_navigation = true })')
 
   child.set_lines ({ "line 1", "-- comment", "line 3" })
   child.bo.filetype = "lua"
   child.lua ("HideComment.enable()")
 
-  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
-  eq (child.lua_get ("(function() local m = vim.fn.maparg('k', 'n', false, true); return next(m) == nil end)()"), true)
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) ~= nil end)()"), true)
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('k', 'n', false, true); return next(m) ~= nil end)()"), true)
   eq (child.lua_get ("(function() local m = vim.fn.maparg('h', 'n', false, true); return next(m) == nil end)()"), true)
   eq (child.lua_get ("(function() local m = vim.fn.maparg('l', 'n', false, true); return next(m) == nil end)()"), true)
+end
+
+T["smart_navigation"]["reveal mode temporarily reveals landed concealed line"] = function ()
+  child.lua ('require("hide-comment").setup({ smart_navigation = true, smart_navigation_mode = "reveal" })')
+
+  child.set_lines ({
+    "start",
+    "-- alpha comment",
+    "-- beta comment",
+    "visible",
+  })
+  child.bo.filetype = "lua"
+  child.lua ("HideComment.enable()")
+  child.api.nvim_win_set_cursor (0, { 1, 0 })
+
+  child.lua ([[vim.fn.search("beta", "W")]])
+
+  local extmarks_after_reveal = child.lua_get (
+    "vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_create_namespace('hide-comment'), 0, -1, {details = true})"
+  )
+  eq (#extmarks_after_reveal, 1)
+
+  child.type_keys ("j")
+  vim.wait (20)
+
+  local extmarks_after_leave = child.lua_get (
+    "vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_create_namespace('hide-comment'), 0, -1, {details = true})"
+  )
+  eq (#extmarks_after_leave, 2)
 end
 
 -- -- Auto enable =================================================================
@@ -607,6 +642,16 @@ T["user_commands"]["HideCommentStatus works"] = function ()
 
   -- Should not error
   child.cmd ("HideCommentStatus")
+end
+
+T["user_commands"]["HideCommentNavMode toggles navigation mode"] = function ()
+  child.lua ('require("hide-comment").setup({ smart_navigation_mode = "skip" })')
+
+  eq (child.lua_get ("HideComment.get_navigation_mode()"), "skip")
+  child.cmd ("HideCommentNavMode toggle")
+  eq (child.lua_get ("HideComment.get_navigation_mode()"), "reveal")
+  child.cmd ("HideCommentNavMode skip")
+  eq (child.lua_get ("HideComment.get_navigation_mode()"), "skip")
 end
 
 -- Inline comments ============================================================
