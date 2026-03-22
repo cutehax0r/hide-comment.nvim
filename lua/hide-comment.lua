@@ -161,6 +161,12 @@ H.comment_query = "(comment) @comment"
 ---@type table<__hide_comment_buffer_handle, ConcealedLine[]> Track concealed lines per buffer
 H.concealed_buffers = {}
 
+---@type table<__hide_comment_buffer_handle, boolean> Track buffers with active smart-navigation maps
+H.navigation_attached = {}
+
+---@type table<string, { conceallevel: number, concealcursor: string }> Track original window conceal options
+H.window_option_state = {}
+
 ---@type __hide_comment_namespace_id The namespace for concealing extmarks
 H.namespace_id = vim.api.nvim_create_namespace ("hide-comment")
 
@@ -240,6 +246,71 @@ H.get_query_language = function (bufnr, parser)
   end
 
   return filetype
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@return number[] windows
+H.get_buffer_windows = function (bufnr)
+  return vim.fn.win_findbuf (bufnr)
+end
+
+---@param winid number
+---@param bufnr __hide_comment_buffer_handle
+---@return string
+H.window_state_key = function (winid, bufnr)
+  return string.format ("%d:%d", winid, bufnr)
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@param winid number
+H.apply_window_conceal_options = function (bufnr, winid)
+  if not vim.api.nvim_win_is_valid (winid) then
+    return
+  end
+
+  local config = H.get_buffer_config (bufnr)
+  local state_key = H.window_state_key (winid, bufnr)
+  if not H.window_option_state[state_key] then
+    H.window_option_state[state_key] = {
+      conceallevel = vim.api.nvim_get_option_value ("conceallevel", { win = winid }),
+      concealcursor = vim.api.nvim_get_option_value ("concealcursor", { win = winid }),
+    }
+  end
+
+  vim.api.nvim_set_option_value ("conceallevel", config.conceal_level, { win = winid })
+  vim.api.nvim_set_option_value ("concealcursor", "nvic", { win = winid })
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@param winid number
+H.restore_window_conceal_options = function (bufnr, winid)
+  if not vim.api.nvim_win_is_valid (winid) then
+    return
+  end
+
+  local state_key = H.window_state_key (winid, bufnr)
+  local state = H.window_option_state[state_key]
+  if not state then
+    return
+  end
+
+  vim.api.nvim_set_option_value ("conceallevel", state.conceallevel, { win = winid })
+  vim.api.nvim_set_option_value ("concealcursor", state.concealcursor, { win = winid })
+  H.window_option_state[state_key] = nil
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.apply_conceal_for_buffer_windows = function (bufnr)
+  for _, winid in ipairs (H.get_buffer_windows (bufnr)) do
+    H.apply_window_conceal_options (bufnr, winid)
+  end
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.restore_conceal_for_buffer_windows = function (bufnr)
+  for _, winid in ipairs (H.get_buffer_windows (bufnr)) do
+    H.restore_window_conceal_options (bufnr, winid)
+  end
 end
 
 ---@param bufnr __hide_comment_buffer_handle
@@ -434,18 +505,8 @@ H.apply_concealing = function (bufnr)
     return true, nil
   end
 
-  -- Set conceallevel and concealcursor
-  local config = H.get_config ()
-  local current_win = vim.api.nvim_get_current_win ()
-  local buf_win = vim.fn.bufwinid (bufnr)
-
-  if buf_win ~= -1 then
-    vim.api.nvim_set_option_value ("conceallevel", config.conceal_level, { win = buf_win })
-    vim.api.nvim_set_option_value ("concealcursor", "nvic", { win = buf_win })
-  else
-    vim.api.nvim_set_option_value ("conceallevel", config.conceal_level, { win = current_win })
-    vim.api.nvim_set_option_value ("concealcursor", "nvic", { win = current_win })
-  end
+  -- Apply conceal options in windows showing this buffer
+  H.apply_conceal_for_buffer_windows (bufnr)
 
   local concealed_lines = H.create_concealing_extmarks (bufnr, nodes)
   H.concealed_buffers[bufnr] = concealed_lines
@@ -468,17 +529,8 @@ H.remove_concealing = function (bufnr)
   vim.api.nvim_buf_clear_namespace (bufnr, H.namespace_id, 0, -1)
   H.concealed_buffers[bufnr] = nil
 
-  -- Reset conceallevel and concealcursor
-  local current_win = vim.api.nvim_get_current_win ()
-  local buf_win = vim.fn.bufwinid (bufnr)
-
-  if buf_win ~= -1 then
-    vim.api.nvim_set_option_value ("conceallevel", 0, { win = buf_win })
-    vim.api.nvim_set_option_value ("concealcursor", "", { win = buf_win })
-  else
-    vim.api.nvim_set_option_value ("conceallevel", 0, { win = current_win })
-    vim.api.nvim_set_option_value ("concealcursor", "", { win = current_win })
-  end
+  -- Restore original conceal options in windows showing this buffer
+  H.restore_conceal_for_buffer_windows (bufnr)
 
   H.debug_log ("Successfully removed concealing")
   return true, nil
@@ -642,13 +694,41 @@ H.smart_navigate = function (direction, count)
   end
 end
 
-H.setup_navigation_keymaps = function ()
-  local config = H.get_config ()
-  if not config.smart_navigation then
+H.navigation_maps = {
+  { "i", "<Down>", "down" },
+  { "i", "<Up>", "up" },
+  { "i", "<Right>", "right" },
+  { "i", "<Left>", "left" },
+  { "n", "j", "down" },
+  { "n", "k", "up" },
+  { "n", "<Down>", "down" },
+  { "n", "<Up>", "up" },
+  { "n", "l", "right" },
+  { "n", "h", "left" },
+  { "n", "<Right>", "right" },
+  { "n", "<Left>", "left" },
+  { "v", "j", "down" },
+  { "v", "k", "up" },
+  { "v", "<Down>", "down" },
+  { "v", "<Up>", "up" },
+  { "v", "l", "right" },
+  { "v", "h", "left" },
+  { "v", "<Right>", "right" },
+  { "v", "<Left>", "left" },
+}
+
+H.setup_navigation_keymaps = function (bufnr)
+  local config = H.get_buffer_config (bufnr)
+  if not config.smart_navigation or H.navigation_attached[bufnr] then
     return
   end
 
-  local keymap_opts = { desc = "Smart comment navigation" }
+  local is_valid, _ = H.validate_buffer (bufnr)
+  if not is_valid then
+    return
+  end
+
+  local keymap_opts = { desc = "Smart comment navigation", buffer = bufnr, silent = true }
 
   local function move_down ()
     H.smart_navigate (H.direction.down, vim.v.count1)
@@ -662,31 +742,34 @@ H.setup_navigation_keymaps = function ()
   local function move_left ()
     H.smart_navigate_horizontal (-1, vim.v.count1)
   end
-  -- Insert mode mappings
-  vim.keymap.set ("i", "<Down>", move_down, keymap_opts)
-  vim.keymap.set ("i", "<Up>", move_up, keymap_opts)
-  vim.keymap.set ("i", "<Right>", move_right, keymap_opts)
-  vim.keymap.set ("i", "<Left>", move_left, keymap_opts)
 
-  -- Normal mode mappings
-  vim.keymap.set ("n", "j", move_down, keymap_opts)
-  vim.keymap.set ("n", "k", move_up, keymap_opts)
-  vim.keymap.set ("n", "<Down>", move_down, keymap_opts)
-  vim.keymap.set ("n", "<Up>", move_up, keymap_opts)
-  vim.keymap.set ("n", "l", move_right, keymap_opts)
-  vim.keymap.set ("n", "h", move_left, keymap_opts)
-  vim.keymap.set ("n", "<Right>", move_right, keymap_opts)
-  vim.keymap.set ("n", "<Left>", move_left, keymap_opts)
+  local handlers = {
+    down = move_down,
+    up = move_up,
+    right = move_right,
+    left = move_left,
+  }
 
-  -- Visual mode mappings
-  vim.keymap.set ("v", "j", move_down, keymap_opts)
-  vim.keymap.set ("v", "k", move_up, keymap_opts)
-  vim.keymap.set ("v", "<Down>", move_down, keymap_opts)
-  vim.keymap.set ("v", "<Up>", move_up, keymap_opts)
-  vim.keymap.set ("v", "l", move_right, keymap_opts)
-  vim.keymap.set ("v", "h", move_left, keymap_opts)
-  vim.keymap.set ("v", "<Right>", move_right, keymap_opts)
-  vim.keymap.set ("v", "<Left>", move_left, keymap_opts)
+  for _, map in ipairs (H.navigation_maps) do
+    local mode, lhs, handler_name = map[1], map[2], map[3]
+    vim.keymap.set (mode, lhs, handlers[handler_name], keymap_opts)
+  end
+
+  H.navigation_attached[bufnr] = true
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.remove_navigation_keymaps = function (bufnr)
+  if not H.navigation_attached[bufnr] then
+    return
+  end
+
+  for _, map in ipairs (H.navigation_maps) do
+    local mode, lhs = map[1], map[2]
+    pcall (vim.keymap.del, mode, lhs, { buffer = bufnr })
+  end
+
+  H.navigation_attached[bufnr] = nil
 end
 
 H.create_autocommands = function ()
@@ -731,11 +814,58 @@ H.create_autocommands = function ()
     })
   end
 
+  vim.api.nvim_create_autocmd ("BufWinEnter", {
+    group = H.augroup_id,
+    callback = function (args)
+      if H.concealed_buffers[args.buf] then
+        local winid = vim.api.nvim_get_current_win ()
+        H.apply_window_conceal_options (args.buf, winid)
+      end
+    end,
+    desc = "Apply window conceal options when entering concealed buffer",
+  })
+
+  vim.api.nvim_create_autocmd ("BufWinLeave", {
+    group = H.augroup_id,
+    callback = function (args)
+      local winid = vim.api.nvim_get_current_win ()
+      H.restore_window_conceal_options (args.buf, winid)
+    end,
+    desc = "Restore window conceal options when leaving buffer",
+  })
+
+  vim.api.nvim_create_autocmd ("WinClosed", {
+    group = H.augroup_id,
+    callback = function (args)
+      local winid = tonumber (args.match)
+      if not winid then
+        return
+      end
+
+      local prefix = string.format ("%d:", winid)
+      for key, _ in pairs (H.window_option_state) do
+        if key:sub (1, #prefix) == prefix then
+          H.window_option_state[key] = nil
+        end
+      end
+    end,
+    desc = "Cleanup stored conceal options for closed windows",
+  })
+
   -- Cleanup on buffer delete
   vim.api.nvim_create_autocmd ("BufDelete", {
     group = H.augroup_id,
     callback = function (args)
+      H.remove_navigation_keymaps (args.buf)
+      H.restore_conceal_for_buffer_windows (args.buf)
       H.concealed_buffers[args.buf] = nil
+
+      local suffix = string.format (":%d", args.buf)
+      for key, _ in pairs (H.window_option_state) do
+        if key:sub (-#suffix) == suffix then
+          H.window_option_state[key] = nil
+        end
+      end
     end,
     desc = "Cleanup hiding data on buffer delete",
   })
@@ -806,8 +936,15 @@ end
 H.apply_config = function (config)
   HideComment.config = config
 
-  -- Set up navigation keymaps
-  H.setup_navigation_keymaps ()
+  if not config.smart_navigation then
+    for bufnr, _ in pairs (H.navigation_attached) do
+      H.remove_navigation_keymaps (bufnr)
+    end
+  else
+    for bufnr, _ in pairs (H.concealed_buffers) do
+      H.setup_navigation_keymaps (bufnr)
+    end
+  end
 end
 
 H.is_disabled = function ()
@@ -816,6 +953,17 @@ end
 
 H.get_config = function (config)
   return vim.tbl_deep_extend ("force", HideComment.config, vim.b.hidecomment_config or {}, config or {})
+end
+
+---@param bufnr __hide_comment_buffer_handle
+---@param config? table
+H.get_buffer_config = function (bufnr, config)
+  local ok, local_config = pcall (vim.api.nvim_buf_get_var, bufnr, "hidecomment_config")
+  if not ok or type (local_config) ~= "table" then
+    local_config = {}
+  end
+
+  return vim.tbl_deep_extend ("force", HideComment.config, local_config, config or {})
 end
 
 H.default_config = vim.deepcopy (HideComment.config)
@@ -843,6 +991,9 @@ HideComment.enable = function (bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf ()
 
   local success, error_msg = H.apply_concealing (bufnr)
+  if success then
+    H.setup_navigation_keymaps (bufnr)
+  end
   return success, error_msg
 end
 
@@ -863,6 +1014,9 @@ HideComment.disable = function (bufnr)
   bufnr = bufnr or vim.api.nvim_get_current_buf ()
 
   local success, error_msg = H.remove_concealing (bufnr)
+  if success then
+    H.remove_navigation_keymaps (bufnr)
+  end
   return success, error_msg
 end
 

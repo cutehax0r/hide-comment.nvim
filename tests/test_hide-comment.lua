@@ -811,4 +811,90 @@ T["inline_comments"]["horizontal navigation disabled when smart_navigation is fa
   eq (child.lua_get ("HideComment.config.smart_navigation"), false)
 end
 
+T["smart_navigation"]["keymaps are buffer-local and detach on disable"] = function ()
+  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
+
+  child.set_lines ({ "line 1", "-- comment", "line 3" })
+  child.bo.filetype = "lua"
+  child.lua ("HideComment.enable()")
+
+  eq (child.lua_get (
+    "(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) ~= nil and m.buffer == 1 end)()"
+  ), true)
+
+  child.lua ([[
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(bufnr)
+  ]])
+
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
+
+  child.lua ([[
+    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].filetype == 'lua' then
+        vim.api.nvim_set_current_buf(bufnr)
+        break
+      end
+    end
+  ]])
+
+  child.lua ("HideComment.disable()")
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
+end
+
+T["smart_navigation"]["disabling smart_navigation removes existing buffer keymaps"] = function ()
+  child.lua ('require("hide-comment").setup({ smart_navigation = true })')
+
+  child.set_lines ({ "line 1", "-- comment", "line 3" })
+  child.bo.filetype = "lua"
+  child.lua ("HideComment.enable()")
+
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) ~= nil end)()"), true)
+
+  child.lua ('require("hide-comment").setup({ smart_navigation = false })')
+  eq (child.lua_get ("(function() local m = vim.fn.maparg('j', 'n', false, true); return next(m) == nil end)()"), true)
+end
+
+-- Window options =============================================================
+T["window_options"] = new_set ()
+
+T["window_options"]["restores conceal options on disable"] = function ()
+  child.lua ('require("hide-comment").setup({ conceal_level = 3 })')
+
+  child.set_lines ({ "-- comment", "local x = 1" })
+  child.bo.filetype = "lua"
+
+  child.api.nvim_set_option_value ("conceallevel", 1, { win = 0 })
+  child.api.nvim_set_option_value ("concealcursor", "nc", { win = 0 })
+
+  child.lua ("HideComment.enable()")
+  eq (child.api.nvim_get_option_value ("conceallevel", { win = 0 }), 3)
+  eq (child.api.nvim_get_option_value ("concealcursor", { win = 0 }), "nvic")
+
+  child.lua ("HideComment.disable()")
+  eq (child.api.nvim_get_option_value ("conceallevel", { win = 0 }), 1)
+  eq (child.api.nvim_get_option_value ("concealcursor", { win = 0 }), "nc")
+end
+
+T["window_options"]["restores conceal options when leaving concealed buffer"] = function ()
+  child.lua ('require("hide-comment").setup({ conceal_level = 3 })')
+
+  child.set_lines ({ "-- comment", "local x = 1" })
+  child.bo.filetype = "lua"
+
+  child.api.nvim_set_option_value ("conceallevel", 1, { win = 0 })
+  child.api.nvim_set_option_value ("concealcursor", "nc", { win = 0 })
+
+  child.lua ("HideComment.enable()")
+  eq (child.api.nvim_get_option_value ("conceallevel", { win = 0 }), 3)
+
+  child.lua ([[
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(bufnr)
+  ]])
+
+  eq (child.api.nvim_get_option_value ("conceallevel", { win = 0 }), 1)
+  eq (child.api.nvim_get_option_value ("concealcursor", { win = 0 }), "nc")
+end
+
 return T
