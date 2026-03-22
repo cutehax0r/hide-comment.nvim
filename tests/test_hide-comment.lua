@@ -163,6 +163,60 @@ T["enable()"]["respects disable flag"] = function ()
   expect.match (result[2] or "", "disabled")
 end
 
+T["enable()"]["resolves query language from mapped filetype"] = function ()
+  child.lua ('require("hide-comment").setup()')
+
+  child.set_lines ({ "-- comment", "local x = 1" })
+  child.bo.filetype = "typescriptreact"
+
+  local result = child.lua_get ([[
+    (function()
+      local original_get_parser = vim.treesitter.get_parser
+      local original_get_lang = vim.treesitter.language.get_lang
+      local original_query_parse = vim.treesitter.query.parse
+      local used_query_lang
+
+      vim.treesitter.get_parser = function(bufnr)
+        local parser = original_get_parser(bufnr, "lua", { error = false })
+        return {
+          parse = function()
+            return parser:parse()
+          end,
+        }
+      end
+
+      vim.treesitter.language.get_lang = function(filetype)
+        if filetype == "typescriptreact" then
+          return "lua"
+        end
+        return original_get_lang(filetype)
+      end
+
+      vim.treesitter.query.parse = function(lang, query)
+        used_query_lang = lang
+        return original_query_parse(lang, query)
+      end
+
+      local success = HideComment.enable()
+      local stats = HideComment.get_stats()
+
+      vim.treesitter.get_parser = original_get_parser
+      vim.treesitter.language.get_lang = original_get_lang
+      vim.treesitter.query.parse = original_query_parse
+
+      return {
+        success = success,
+        query_lang = used_query_lang,
+        concealed_lines = stats.concealed_lines,
+      }
+    end)()
+  ]])
+
+  eq (result.success, true)
+  eq (result.query_lang, "lua")
+  expect.no_equality (result.concealed_lines, 0)
+end
+
 T["disable()"] = new_set ()
 
 T["disable()"]["works"] = function ()
@@ -387,6 +441,20 @@ T["auto_enable"]["respects disable flag"] = function ()
 
   -- Should not be enabled due to disable flag
   eq (child.lua_get ("HideComment.is_enabled()"), false)
+end
+
+T["auto_enable"]["handles deleted buffer in scheduled callback"] = function ()
+  child.lua ('require("hide-comment").setup({ auto_enable = true, silent = true })')
+
+  child.lua ([[
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_set_current_buf(bufnr)
+    vim.bo[bufnr].filetype = "lua"
+    vim.api.nvim_buf_delete(bufnr, { force = true })
+    vim.wait(50)
+  ]])
+
+  eq (true, true)
 end
 
 -- Edge cases ==================================================================

@@ -226,6 +226,26 @@ H.get_treesitter_parser = function (bufnr)
 end
 
 ---@param bufnr __hide_comment_buffer_handle
+---@param parser any?
+---@return string language
+H.get_query_language = function (bufnr, parser)
+  if parser and type (parser.lang) == "function" then
+    local ok, parser_lang = pcall (parser.lang, parser)
+    if ok and type (parser_lang) == "string" and parser_lang ~= "" then
+      return parser_lang
+    end
+  end
+
+  local filetype = vim.api.nvim_get_option_value ("filetype", { buf = bufnr })
+  local ts_language = vim.treesitter.language
+  if ts_language and type (ts_language.get_lang) == "function" then
+    return ts_language.get_lang (filetype) or filetype
+  end
+
+  return filetype
+end
+
+---@param bufnr __hide_comment_buffer_handle
 ---@return CommentNode[] nodes
 ---@return string? error_message
 H.get_comment_nodes = function (bufnr)
@@ -247,10 +267,10 @@ H.get_comment_nodes = function (bufnr)
   end
 
   -- Try to parse the universal comment query
-  local filetype = vim.api.nvim_get_option_value ("filetype", { buf = bufnr })
-  local ok, query = pcall (vim.treesitter.query.parse, filetype, H.comment_query)
+  local query_lang = H.get_query_language (bufnr, parser)
+  local ok, query = pcall (vim.treesitter.query.parse, query_lang, H.comment_query)
   if not ok or not query then
-    return {}, "Failed to parse comment query for filetype: " .. filetype
+    return {}, "Failed to parse comment query for language: " .. query_lang
   end
 
   local nodes = {}
@@ -688,6 +708,10 @@ H.create_autocommands = function ()
           return
         end
         vim.schedule (function ()
+          if not vim.api.nvim_buf_is_valid (args.buf) then
+            return
+          end
+
           if vim.treesitter.get_parser (args.buf, nil, { error = false }) then
             HideComment.enable (args.buf)
           end
@@ -768,17 +792,15 @@ end
 H.setup_config = function (config)
   -- General idea: if some table elements are not present in user-supplied
   -- `config`, take them from default config
-  vim.validate ({ config = { config, "table", true } })
+  vim.validate ("config", config, "table", true)
   config = vim.tbl_deep_extend ("force", vim.deepcopy (H.default_config), config or {})
 
-  vim.validate ({
-    auto_enable = { config.auto_enable, "boolean" },
-    smart_navigation = { config.smart_navigation, "boolean" },
-    conceal_level = { config.conceal_level, "number" },
-    refresh_on_change = { config.refresh_on_change, "boolean" },
-    debug = { config.debug, "boolean" },
-    silent = { config.silent, "boolean" },
-  })
+  vim.validate ("auto_enable", config.auto_enable, "boolean")
+  vim.validate ("smart_navigation", config.smart_navigation, "boolean")
+  vim.validate ("conceal_level", config.conceal_level, "number")
+  vim.validate ("refresh_on_change", config.refresh_on_change, "boolean")
+  vim.validate ("debug", config.debug, "boolean")
+  vim.validate ("silent", config.silent, "boolean")
 
   -- Validate conceal_level range
   if config.conceal_level < 0 or config.conceal_level > 3 then
