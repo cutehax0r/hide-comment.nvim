@@ -42,7 +42,6 @@
 ---@alias __hide_comment_buffer_handle number
 ---@alias __hide_comment_line_number number
 ---@alias __hide_comment_column_number number
----@alias __hide_comment_extmark_id number
 ---@alias __hide_comment_namespace_id number
 
 ---@class CommentNode
@@ -54,8 +53,6 @@
 
 ---@class ConcealedLine
 ---@field row __hide_comment_line_number 0-based line number
----@field extmark_id __hide_comment_extmark_id The extmark ID for this concealed line
----@field original_text string The original line content
 
 ---@class NavigationDirection
 ---@field down number
@@ -331,7 +328,7 @@ H.create_concealing_extmarks = function (bufnr, nodes)
 
       if is_full_line_comment then
         -- Full line comment - conceal the entire line
-        local ok, extmark_id = pcall (vim.api.nvim_buf_set_extmark, bufnr, H.namespace_id, row, 0, {
+        local ok = pcall (vim.api.nvim_buf_set_extmark, bufnr, H.namespace_id, row, 0, {
           end_row = row,
           end_col = #line_text,
           conceal_lines = "",
@@ -341,15 +338,13 @@ H.create_concealing_extmarks = function (bufnr, nodes)
         if ok then
           table.insert (concealed_lines, {
             row = row,
-            extmark_id = extmark_id,
-            original_text = line_text,
           })
         else
           H.debug_log ("Failed to create extmark for row " .. row, vim.log.levels.WARN)
         end
       else
         -- Inline comment - conceal only the comment part
-        local ok, extmark_id = pcall (vim.api.nvim_buf_set_extmark, bufnr, H.namespace_id, row, node.start_col, {
+        local ok = pcall (vim.api.nvim_buf_set_extmark, bufnr, H.namespace_id, row, node.start_col, {
           end_row = row,
           end_col = node.end_col,
           conceal = "",
@@ -386,7 +381,7 @@ H.create_concealing_extmarks = function (bufnr, nodes)
         -- Check if this line is entirely within the comment
         local spans_entire_line = start_col == 0 and end_col == #line_text
         local is_full_line_comment = spans_entire_line and line_text:match ("^%s*$") == nil
-        local ok, extmark_id = pcall (vim.api.nvim_buf_set_extmark, bufnr, H.namespace_id, row, start_col, {
+        local ok = pcall (vim.api.nvim_buf_set_extmark, bufnr, H.namespace_id, row, start_col, {
           end_row = row,
           end_col = end_col,
           conceal_lines = "",
@@ -398,8 +393,6 @@ H.create_concealing_extmarks = function (bufnr, nodes)
           if is_full_line_comment then
             table.insert (concealed_lines, {
               row = row,
-              extmark_id = extmark_id,
-              original_text = line_text,
             })
           else
             H.debug_log (
@@ -911,7 +904,6 @@ end
 ---   end
 --- <
 HideComment.is_enabled = function (bufnr)
-  -- Hello, world!
   bufnr = bufnr or vim.api.nvim_get_current_buf ()
   return H.concealed_buffers[bufnr] ~= nil
 end
@@ -927,7 +919,7 @@ end
 ---     stats.concealed_lines, stats.total_lines, stats.concealed_percentage))
 --- <
 HideComment.get_stats = function (bufnr)
-  bufnr = bufnr or vim.api.nvim_get_current_buf () -- test
+  bufnr = bufnr or vim.api.nvim_get_current_buf ()
 
   local concealed_lines = H.concealed_buffers[bufnr] or {}
   local total_lines = vim.api.nvim_buf_line_count (bufnr)
