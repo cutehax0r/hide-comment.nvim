@@ -124,6 +124,10 @@ end
 --- content changes. This ensures new comments are hidden and deleted comments
 --- are no longer concealed.
 ---
+--- `refresh_debounce_ms` controls how long to wait after edits before
+--- reapplying concealing. This reduces expensive reparses during rapid typing.
+--- Set to `0` to refresh immediately.
+---
 --- ## Debug mode ~
 ---
 --- `debug` enables debug logging to help troubleshoot issues.
@@ -139,6 +143,9 @@ HideComment.config = {
 
   -- Refresh concealing when buffer content changes
   refresh_on_change = true,
+
+  -- Debounce delay for refresh_on_change (in milliseconds)
+  refresh_debounce_ms = 100,
 
   -- Whether to enable debug logging
   debug = false,
@@ -166,6 +173,9 @@ H.navigation_attached = {}
 
 ---@type table<string, { conceallevel: number, concealcursor: string }> Track original window conceal options
 H.window_option_state = {}
+
+---@type table<__hide_comment_buffer_handle, uv_timer_t> Track pending refresh debounce timers
+H.refresh_timers = {}
 
 ---@type __hide_comment_namespace_id The namespace for concealing extmarks
 H.namespace_id = vim.api.nvim_create_namespace ("hide-comment")
@@ -311,6 +321,58 @@ H.restore_conceal_for_buffer_windows = function (bufnr)
   for _, winid in ipairs (H.get_buffer_windows (bufnr)) do
     H.restore_window_conceal_options (bufnr, winid)
   end
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.cancel_refresh_timer = function (bufnr)
+  local timer = H.refresh_timers[bufnr]
+  if not timer then
+    return
+  end
+
+  H.refresh_timers[bufnr] = nil
+  pcall (timer.stop, timer)
+  pcall (timer.close, timer)
+end
+
+---@param bufnr __hide_comment_buffer_handle
+H.schedule_refresh = function (bufnr)
+  H.cancel_refresh_timer (bufnr)
+
+  local config = H.get_buffer_config (bufnr)
+  local debounce_ms = config.refresh_debounce_ms or 0
+  if debounce_ms <= 0 then
+    vim.schedule (function ()
+      if not vim.api.nvim_buf_is_valid (bufnr) then
+        return
+      end
+      if H.is_disabled () or not H.concealed_buffers[bufnr] then
+        return
+      end
+
+      HideComment.enable (bufnr)
+    end)
+    return
+  end
+
+  local timer = vim.uv.new_timer ()
+  if not timer then
+    return
+  end
+
+  H.refresh_timers[bufnr] = timer
+  timer:start (debounce_ms, 0, vim.schedule_wrap (function ()
+    H.cancel_refresh_timer (bufnr)
+
+    if not vim.api.nvim_buf_is_valid (bufnr) then
+      return
+    end
+    if H.is_disabled () or not H.concealed_buffers[bufnr] then
+      return
+    end
+
+    HideComment.enable (bufnr)
+  end))
 end
 
 ---@param bufnr __hide_comment_buffer_handle
@@ -805,9 +867,7 @@ H.create_autocommands = function ()
           return
         end
         if H.concealed_buffers[args.buf] then
-          vim.schedule (function ()
-            HideComment.enable (args.buf)
-          end)
+          H.schedule_refresh (args.buf)
         end
       end,
       desc = "Refresh comment hiding on text changes",
@@ -857,6 +917,7 @@ H.create_autocommands = function ()
     group = H.augroup_id,
     callback = function (args)
       H.remove_navigation_keymaps (args.buf)
+      H.cancel_refresh_timer (args.buf)
       H.restore_conceal_for_buffer_windows (args.buf)
       H.concealed_buffers[args.buf] = nil
 
@@ -922,12 +983,17 @@ H.setup_config = function (config)
   vim.validate ("smart_navigation", config.smart_navigation, "boolean")
   vim.validate ("conceal_level", config.conceal_level, "number")
   vim.validate ("refresh_on_change", config.refresh_on_change, "boolean")
+  vim.validate ("refresh_debounce_ms", config.refresh_debounce_ms, "number")
   vim.validate ("debug", config.debug, "boolean")
   vim.validate ("silent", config.silent, "boolean")
 
   -- Validate conceal_level range
   if config.conceal_level < 0 or config.conceal_level > 3 then
     error ("(hide-comment) `conceal_level` should be between 0 and 3")
+  end
+
+  if config.refresh_debounce_ms < 0 then
+    error ("(hide-comment) `refresh_debounce_ms` should be >= 0")
   end
 
   return config
@@ -1015,6 +1081,7 @@ HideComment.disable = function (bufnr)
 
   local success, error_msg = H.remove_concealing (bufnr)
   if success then
+    H.cancel_refresh_timer (bufnr)
     H.remove_navigation_keymaps (bufnr)
   end
   return success, error_msg

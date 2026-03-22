@@ -93,6 +93,10 @@ T["setup()"]["validates config"] = function ()
   expect.error (function ()
     child.lua ('require("hide-comment").setup({ auto_enable = "yes" })')
   end)
+
+  expect.error (function ()
+    child.lua ('require("hide-comment").setup({ refresh_debounce_ms = -1 })')
+  end)
 end
 
 -- Config ======================================================================
@@ -106,6 +110,7 @@ T["config"]["has correct default"] = function ()
   eq (config.smart_navigation, true)
   eq (config.conceal_level, 3)
   eq (config.refresh_on_change, true)
+  eq (config.refresh_debounce_ms, 100)
   eq (config.debug, false)
   eq (config.silent, false)
 end
@@ -455,6 +460,32 @@ T["auto_enable"]["handles deleted buffer in scheduled callback"] = function ()
   ]])
 
   eq (true, true)
+end
+
+T["auto_enable"]["debounces refresh_on_change updates"] = function ()
+  child.lua ('require("hide-comment").setup({ refresh_on_change = true, refresh_debounce_ms = 100, silent = true })')
+
+  child.set_lines (vim.split (test_lua_file, "\n"))
+  child.bo.filetype = "lua"
+  child.lua ("HideComment.enable()")
+
+  child.lua ([[_G.__hidecomment_refresh_count = 0]])
+  child.lua ([[
+    local original_enable = HideComment.enable
+    HideComment.enable = function(bufnr)
+      _G.__hidecomment_refresh_count = _G.__hidecomment_refresh_count + 1
+      return original_enable(bufnr)
+    end
+  ]])
+
+  child.type_keys ("Go-- one")
+  child.type_keys ("Go-- two")
+
+  vim.wait (50)
+  eq (child.lua_get ("_G.__hidecomment_refresh_count"), 0)
+
+  vim.wait (120)
+  eq (child.lua_get ("_G.__hidecomment_refresh_count"), 1)
 end
 
 -- Edge cases ==================================================================

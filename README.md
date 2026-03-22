@@ -55,6 +55,9 @@ require ("hide-comment").setup ({
   -- Refresh concealing when buffer content changes
   refresh_on_change = true,
 
+  -- Debounce delay for refresh_on_change (in milliseconds)
+  refresh_debounce_ms = 100,
+
   -- Enable debug logging
   debug = false,
 
@@ -103,7 +106,10 @@ You can override settings per buffer:
 
 ```lua
 -- Disable auto-refresh for this buffer only
-vim.b.hidecomment_config = { refresh_on_change = false }
+vim.b.hidecomment_config = {
+  refresh_on_change = true,
+  refresh_debounce_ms = 250,
+}
 ```
 
 ### Disabling
